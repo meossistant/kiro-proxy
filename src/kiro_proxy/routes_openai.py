@@ -5,7 +5,8 @@ from typing import AsyncGenerator
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from kiro_proxy.auth import verify_api_key
-from kiro_proxy.formatters import map_model_name, format_openai_messages, VALID_KIRO_MODELS
+from kiro_proxy.formatters import format_openai_messages
+from kiro_proxy.registry import registry
 from kiro_proxy.kiro_runner import run_kiro_stream, run_kiro_complete
 from kiro_proxy.models import (
     ChatCompletionRequest,
@@ -22,12 +23,17 @@ router = APIRouter(dependencies=[Depends(verify_api_key)])
 @router.get("/models", response_model=ModelListResponse)
 async def list_models():
     """
-    List available models compatible with OpenAI client libraries.
+    List models dynamically extracted from kiro-cli (or catalog fallback).
     """
     now = int(time.time())
+    active_models = await registry.get_available_models()
     cards = [
-        ModelCard(id=model_id, created=now, owned_by="kiro")
-        for model_id in VALID_KIRO_MODELS
+        ModelCard(
+            id=m["model_id"],
+            created=now,
+            owned_by="kiro"
+        )
+        for m in active_models
     ]
     return ModelListResponse(data=cards)
 
@@ -35,9 +41,10 @@ async def list_models():
 @router.post("/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
     """
-    OpenAI-compatible Chat Completions endpoint supporting both streaming and non-streaming.
+    OpenAI-compatible Chat Completions endpoint with dynamic routing and stream-json parsing.
+    Defaults to gpt-5.6-terra (or best available general model in active tier).
     """
-    mapped_model = map_model_name(request.model)
+    mapped_model = await registry.resolve_model(request.model, api_flavor="openai")
     prompt = format_openai_messages(request.messages)
     req_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created_ts = int(time.time())
@@ -93,8 +100,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
     # Non-streaming response
     text, stop_reason = await run_kiro_complete(prompt, model=mapped_model)
-    
-    # Rough token estimation for response compliance
+
     prompt_tokens = max(1, len(prompt.split()))
     completion_tokens = max(1, len(text.split()))
 

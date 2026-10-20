@@ -1,7 +1,8 @@
 import pytest
 from fastapi.testclient import TestClient
 from kiro_proxy.main import app
-from kiro_proxy.formatters import map_model_name, format_openai_messages, format_anthropic_messages
+from kiro_proxy.registry import registry
+from kiro_proxy.formatters import format_openai_messages, format_anthropic_messages
 from kiro_proxy.models import ChatMessage, AnthropicMessage
 
 client = TestClient(app)
@@ -12,6 +13,7 @@ def test_health_check():
     data = response.json()
     assert data["status"] == "healthy"
     assert data["service"] == "kiro-proxy"
+    assert "available_models" in data
 
 def test_list_models():
     response = client.get("/v1/models")
@@ -20,16 +22,31 @@ def test_list_models():
     assert data["object"] == "list"
     assert len(data["data"]) > 0
     model_ids = [m["id"] for m in data["data"]]
-    assert "claude-sonnet-4.5" in model_ids
     assert "auto" in model_ids
 
-def test_map_model_name():
-    assert map_model_name("claude-3-7-sonnet") == "claude-sonnet-4.5"
-    assert map_model_name("gpt-4o") == "claude-sonnet-4.5"
-    assert map_model_name("gpt-4o-mini") == "claude-haiku-4.5"
-    assert map_model_name("deepseek-chat") == "deepseek-3.2"
-    assert map_model_name("qwen-max") == "qwen3-coder-next"
-    assert map_model_name("auto") == "auto"
+@pytest.mark.asyncio
+async def test_resolve_model_defaults():
+    # Anthropic default must resolve to Sonnet
+    anthropic_default = await registry.resolve_model(None, api_flavor="anthropic")
+    assert "sonnet" in anthropic_default
+
+    # OpenAI default must resolve to Terra (or fallback Sonnet if in Free tier)
+    openai_default = await registry.resolve_model(None, api_flavor="openai")
+    assert any(k in openai_default for k in ["terra", "sonnet", "auto"])
+
+@pytest.mark.asyncio
+async def test_resolve_model_auto_routing():
+    # Haiku requests
+    haiku_res = await registry.resolve_model("claude-haiku-4.5", api_flavor="anthropic")
+    assert "haiku" in haiku_res or "luna" in haiku_res
+
+    # DeepSeek requests
+    deepseek_res = await registry.resolve_model("deepseek-v3", api_flavor="openai")
+    assert "deepseek" in deepseek_res
+
+    # Qwen requests
+    qwen_res = await registry.resolve_model("qwen-coder", api_flavor="openai")
+    assert "qwen" in qwen_res
 
 def test_format_openai_messages():
     messages = [

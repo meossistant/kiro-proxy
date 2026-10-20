@@ -4,7 +4,8 @@ from typing import AsyncGenerator
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from kiro_proxy.auth import verify_api_key
-from kiro_proxy.formatters import map_model_name, format_anthropic_messages
+from kiro_proxy.formatters import format_anthropic_messages
+from kiro_proxy.registry import registry
 from kiro_proxy.kiro_runner import run_kiro_stream, run_kiro_complete
 from kiro_proxy.models import (
     AnthropicMessageRequest,
@@ -19,9 +20,10 @@ router = APIRouter(dependencies=[Depends(verify_api_key)])
 @router.post("/messages")
 async def anthropic_messages(request: AnthropicMessageRequest):
     """
-    Anthropic-compatible Messages API supporting both streaming SSE and JSON responses.
+    Anthropic-compatible Messages API with dynamic routing and stream-json parsing.
+    Defaults to Sonnet (claude-sonnet-5.5 or best available sonnet in active tier).
     """
-    mapped_model = map_model_name(request.model)
+    mapped_model = await registry.resolve_model(request.model, api_flavor="anthropic")
     prompt = format_anthropic_messages(request.messages, system=request.system)
     msg_id = f"msg_{uuid.uuid4().hex[:20]}"
     prompt_tokens = max(1, len(prompt.split()))
