@@ -1,0 +1,28 @@
+[project]
+name = "kiro-proxy"
+version = "0.1.0"
+description = "OpenAI and Anthropic compatible FastAPI proxy server for AWS Kiro AI CLI"
+readme = "README.md"
+authors = [
+    { name = "meossistant", email = "meossistant@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.150.0",
+    "httpx>=0.28.1",
+    "pydantic>=2.14.1",
+    "python-dotenv>=1.2.4",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+kiro-proxy = "kiro_proxy.main:start"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
