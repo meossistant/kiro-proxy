@@ -42,13 +42,31 @@ The proxy dynamically adapts whether your account is on the **Free** tier or the
 
 ## 🚀 Quick Start
 
+> 🤖 **Automated Setup for AI Coding Agents**: See [AGENT_INSTALL.md](AGENT_INSTALL.md) for automated agent setup instructions and system PATH configuration.  
+> 💻 **Claude Code CLI Setup**: See [CLAUDE_CODE_SETUP.md](CLAUDE_CODE_SETUP.md) for connecting Anthropic's Claude Code CLI.
+
 ### 1. Prerequisites
 
-- Linux or macOS with `python >= 3.12`
+- Linux, macOS, or Windows with `python >= 3.12`
 - [`uv`](https://github.com/astral-sh/uv) installed
 - `kiro-cli` installed and authenticated (`kiro-cli login`)
 
-### 2. Installation
+### 2. Automated Installation
+
+Run the one-line installer from inside the repository:
+
+- **Linux / macOS**:
+  ```bash
+  ./scripts/install.sh
+  ```
+- **Windows (PowerShell)**:
+  ```powershell
+  .\scripts\install.ps1
+  ```
+
+This syncs dependencies with `uv` and installs `kiro-proxy` globally to your system PATH.
+
+### 3. Manual Installation
 
 Clone this repository and sync dependencies:
 
@@ -155,6 +173,19 @@ curl -N -X POST http://localhost:8000/v1/messages \
     "stream": true
   }'
 ```
+
+### 5. Using Claude Code CLI
+
+Connect Anthropic's official `claude` command-line tool directly to `kiro-proxy`:
+
+```bash
+export ANTHROPIC_BASE_URL="http://localhost:8000"
+export ANTHROPIC_API_KEY="none"
+
+claude --model claude-sonnet-5.5
+```
+
+See the full [Claude Code Setup Guide](CLAUDE_CODE_SETUP.md) for shell aliases, Windows configuration, and troubleshooting.
 
 ---
 
