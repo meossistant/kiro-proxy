@@ -7,16 +7,45 @@ from kiro_proxy.config import settings
 
 logger = logging.getLogger("kiro-proxy")
 
+AUTH_ERROR_PATTERNS = [
+    "not logged in",
+    "welcome to kiro cli, let's get you signed in",
+    "please try again with: kiro-cli login",
+    "failed to open browser for authentication",
+    "session expired",
+    "unauthorized"
+]
+
+async def check_kiro_auth() -> dict[str, Any]:
+    """
+    Check if Kiro CLI currently has a valid authenticated session using 'kiro-cli whoami'.
+    """
+    cmd = [settings.KIRO_CLI_PATH, "whoami"]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            info = stdout.decode("utf-8").strip()
+            return {"authenticated": True, "info": info}
+        else:
+            return {"authenticated": False, "info": "Not logged in"}
+    except Exception as e:
+        logger.warning(f"Error checking kiro auth: {e}")
+        return {"authenticated": False, "info": str(e)}
+
 async def run_kiro_stream(
     prompt: str,
     model: str | None = None,
-    agent: str | None = None
+    agent: str | None = None,
+    timeout_seconds: float = 60.0
 ) -> AsyncGenerator[dict[str, Any], None]:
     """
-    Run kiro-cli chat with stream-json output format and yield structured events.
-    Yields dicts with:
-      {"type": "chunk", "text": str}
-      {"type": "done", "text": str, "stop_reason": str}
+    Run kiro-cli chat with stream-json output format.
+    Safely detects expired/missing authentication and raises HTTP 401.
     """
     agent_name = agent or settings.KIRO_AGENT
     cmd = [
@@ -41,7 +70,7 @@ async def run_kiro_stream(
         logger.error(f"Kiro CLI binary not found at '{settings.KIRO_CLI_PATH}'")
         raise HTTPException(
             status_code=500,
-            detail=f"Kiro CLI not found at '{settings.KIRO_CLI_PATH}'. Please ensure kiro-cli is installed."
+            detail=f"Kiro CLI binary not found at '{settings.KIRO_CLI_PATH}'. Please ensure kiro-cli is installed."
         )
 
     # Send prompt via stdin and close stdin
@@ -60,8 +89,13 @@ async def run_kiro_stream(
     accumulated_text = ""
     had_output = False
     stop_reason = "stop"
+    stderr_captured: list[str] = []
 
-    if process.stdout:
+    async def read_stdout():
+        nonlocal had_output, accumulated_text, stop_reason
+        if not process.stdout:
+            return
+
         while True:
             line_bytes = await process.stdout.readline()
             if not line_bytes:
@@ -70,6 +104,24 @@ async def run_kiro_stream(
             line_str = line_bytes.decode("utf-8", errors="replace").strip()
             if not line_str:
                 continue
+
+            # Check if stdout contains an interactive sign-in prompt
+            line_lower = line_str.lower()
+            if any(pattern in line_lower for pattern in AUTH_ERROR_PATTERNS):
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+                raise HTTPException(
+                    status_code=401,
+                    detail={
+                        "error": {
+                            "message": "Kiro CLI is signed out or session expired. Please re-authenticate using: kiro-cli login --use-device-flow",
+                            "type": "authentication_error",
+                            "code": "session_expired"
+                        }
+                    }
+                )
 
             try:
                 event = json.loads(line_str)
@@ -99,15 +151,44 @@ async def run_kiro_stream(
                     "stop_reason": stop_reason
                 }
 
+    try:
+        # Wrap reading with timeout to prevent hanging on interactive prompt
+        async for item in read_stdout():
+            yield item
+    except asyncio.TimeoutError:
+        try:
+            process.terminate()
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=504,
+            detail="Timeout waiting for Kiro CLI response."
+        )
+
     returncode = await process.wait()
 
     if returncode != 0 and not had_output:
         stderr_bytes = await process.stderr.read() if process.stderr else b""
-        stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
         logger.error(f"kiro-cli exited with code {returncode}: {stderr_text}")
+
+        stderr_lower = stderr_text.lower()
+        if any(pat in stderr_lower for pat in AUTH_ERROR_PATTERNS):
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": {
+                        "message": "Kiro CLI session expired or not logged in. Run 'kiro-cli login --use-device-flow' to sign in.",
+                        "type": "authentication_error",
+                        "code": "session_expired",
+                        "raw": stderr_text
+                    }
+                }
+            )
+
         raise HTTPException(
             status_code=502,
-            detail=f"Kiro CLI process failed (exit code {returncode}): {stderr_text.strip()}"
+            detail=f"Kiro CLI process failed (exit code {returncode}): {stderr_text}"
         )
 
 async def run_kiro_complete(

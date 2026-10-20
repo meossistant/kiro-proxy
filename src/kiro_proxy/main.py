@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from kiro_proxy.config import settings
 from kiro_proxy.agent_setup import ensure_custom_agent
 from kiro_proxy.registry import registry
+from kiro_proxy.kiro_runner import check_kiro_auth
 from kiro_proxy.routes_openai import router as openai_router
 from kiro_proxy.routes_anthropic import router as anthropic_router
 
@@ -54,10 +55,12 @@ app.include_router(anthropic_router, tags=["Anthropic Compatible"])
 @app.get("/health")
 async def health_check():
     active_models = await registry.get_available_models()
+    auth_status = await check_kiro_auth()
     return {
-        "status": "healthy",
+        "status": "healthy" if auth_status["authenticated"] else "unauthenticated",
         "service": "kiro-proxy",
-        "version": "0.2.0",
+        "version": "0.2.1",
+        "kiro_auth": auth_status,
         "kiro_agent": settings.KIRO_AGENT,
         "default_model_openai": await registry.resolve_model(None, api_flavor="openai"),
         "default_model_anthropic": await registry.resolve_model(None, api_flavor="anthropic"),
