@@ -15,8 +15,10 @@
   - **OpenAI API Default**: Defaults to `gpt-5.6-terra` (or best available general model in active tier).
   - **Anthropic API Default**: Defaults to `Sonnet` (`claude-sonnet-5.5` -> `claude-sonnet-5` -> `claude-sonnet-4.5`).
   - **Cross-Version Routing**: Automatically maps requested model versions (e.g. `gpt-4o`, `claude-3-7-sonnet`, `opus`, `haiku`) to the best matching model in your active tier.
+- **Conversation Continuation & Prompt Caching**: Binds multi-turn conversations to existing Kiro CLI sessions via `--resume-id`. Automatically detects session identifiers (such as Claude Code's `x-claude-code-session-id`, custom `x-session-id`, `user` field, or content prefix hashing) and sends only new delta messages on subsequent turns, saving up to 99.7% of transmitted prompt tokens and utilizing AWS Kiro prompt caching.
 - **True Real-Time Streaming**: Parses Kiro CLI's ACP `stream-json` events in real time and streams SSE chunks instantly.
 - **Custom Generic Agent**: Automatically configures a dedicated generic profile in `~/.kiro/agents/generic.json` with a versatile system prompt and empty toolset for clean, direct completions.
+- **Diagnostic Session Monitoring**: Real-time `/v1/sessions` endpoint to inspect active sessions, turn counts, and cache state.
 - **Modern Python Tooling**: Uses [`uv`](https://docs.astral.sh/uv/) for blazing fast virtual environments and dependency management.
 - **Optional API Key Security**: Protect your proxy with `API_KEY` or `KIRO_PROXY_API_KEY` via standard Bearer tokens or `x-api-key` headers.
 

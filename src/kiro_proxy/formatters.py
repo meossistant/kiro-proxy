@@ -49,16 +49,29 @@ def _extract_text(content: str | list[dict[str, Any]] | None) -> str:
     if isinstance(content, list):
         parts: list[str] = []
         for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                parts.append(str(item.get("text", "")))
+            if isinstance(item, dict):
+                item_type = item.get("type", "")
+                if item_type == "text":
+                    parts.append(str(item.get("text", "")))
+                elif item_type == "tool_use":
+                    tool_name = item.get("name", "tool")
+                    tool_input = item.get("input", {})
+                    parts.append(f"[Tool Request: {tool_name}\nArguments: {tool_input}]")
+                elif item_type == "tool_result":
+                    tool_res = item.get("content", "")
+                    tool_id = item.get("tool_use_id", "")
+                    parts.append(f"[Tool Result ({tool_id}):\n{tool_res}]")
+                elif "text" in item:
+                    parts.append(str(item["text"]))
             elif isinstance(item, str):
                 parts.append(item)
         return "\n".join(parts)
     return str(content)
 
-def format_openai_messages(messages: list[ChatMessage]) -> str:
+def format_openai_messages(messages: list[ChatMessage], is_continuation: bool = False) -> str:
     """
-    Format a sequence of OpenAI chat messages into a cohesive prompt.
+    Format a sequence of OpenAI chat messages into a prompt.
+    If is_continuation is True, skips system instructions and formats only the delta turns.
     """
     if not messages:
         return ""
@@ -72,7 +85,8 @@ def format_openai_messages(messages: list[ChatMessage]) -> str:
         if not text:
             continue
         if role == "system":
-            system_instructions.append(text)
+            if not is_continuation:
+                system_instructions.append(text)
         elif role in ("user", "human"):
             conversation.append(("User", text))
         elif role in ("assistant", "ai", "bot"):
@@ -81,7 +95,7 @@ def format_openai_messages(messages: list[ChatMessage]) -> str:
             conversation.append((role.capitalize(), text))
 
     prompt_parts: list[str] = []
-    if system_instructions:
+    if system_instructions and not is_continuation:
         prompt_parts.append("[System Instructions]\n" + "\n\n".join(system_instructions))
 
     if len(conversation) == 1 and conversation[0][0] == "User":
@@ -90,22 +104,28 @@ def format_openai_messages(messages: list[ChatMessage]) -> str:
         history_lines: list[str] = []
         for speaker, speech in conversation:
             history_lines.append(f"{speaker}: {speech}")
-        prompt_parts.append("[Conversation]\n" + "\n\n".join(history_lines))
+        if is_continuation:
+            prompt_parts.append("\n\n".join(history_lines))
+        else:
+            prompt_parts.append("[Conversation]\n" + "\n\n".join(history_lines))
 
     return "\n\n".join(prompt_parts).strip()
 
 def format_anthropic_messages(
     messages: list[AnthropicMessage],
-    system: str | list[dict[str, Any]] | None = None
+    system: str | list[dict[str, Any]] | None = None,
+    is_continuation: bool = False
 ) -> str:
     """
     Format Anthropic messages and optional system prompt into a prompt string.
+    If is_continuation is True, skips system prompt and formats only delta turns.
     """
     prompt_parts: list[str] = []
 
-    system_text = _extract_text(system)
-    if system_text:
-        prompt_parts.append(f"[System Instructions]\n{system_text}")
+    if not is_continuation:
+        system_text = _extract_text(system)
+        if system_text:
+            prompt_parts.append(f"[System Instructions]\n{system_text}")
 
     conversation: list[tuple[str, str]] = []
     for msg in messages:
@@ -117,6 +137,9 @@ def format_anthropic_messages(
             conversation.append(("User", text))
         elif role in ("assistant", "ai"):
             conversation.append(("Assistant", text))
+        elif role == "system" and is_continuation:
+            # Skip system in continuation
+            continue
         else:
             conversation.append((role.capitalize(), text))
 
@@ -126,6 +149,10 @@ def format_anthropic_messages(
         history_lines: list[str] = []
         for speaker, speech in conversation:
             history_lines.append(f"{speaker}: {speech}")
-        prompt_parts.append("[Conversation]\n" + "\n\n".join(history_lines))
+        if is_continuation:
+            prompt_parts.append("\n\n".join(history_lines))
+        else:
+            prompt_parts.append("[Conversation]\n" + "\n\n".join(history_lines))
 
     return "\n\n".join(prompt_parts).strip()
+

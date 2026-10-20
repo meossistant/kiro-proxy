@@ -13,9 +13,10 @@ This guide explains how to connect Anthropic's official **Claude Code CLI** (`cl
 └────────────────┘         SSE Stream /v1/messages                      └──────────────┘                       └──────────────┘
 ```
 
-1. **Claude Code CLI** sends standard Anthropic `/v1/messages` requests.
-2. **kiro-proxy** receives the request, routes it to the optimal Claude model (e.g., `claude-sonnet-5.5` or `claude-sonnet-4.5`), and executes `kiro-cli chat` with `--output-format stream-json`.
-3. Response tokens are converted to Anthropic Server-Sent Events (SSE) and streamed back in real-time.
+1. **Claude Code CLI** sends standard Anthropic `/v1/messages` requests, including the `x-claude-code-session-id` header.
+2. **kiro-proxy** intercepts the session ID. On turn 1, it passes the agent prompt and receives a Kiro session ID. On subsequent turns (`--resume` or interactive mode), it sends **only the new delta messages** using `kiro-cli chat --resume-id <SESSION_ID>`.
+3. **AWS Kiro AI** automatically reuses the cached prompt tokens, cutting payload transmission by over 99% and accelerating response latency by up to 7x.
+4. Response tokens are converted to Anthropic Server-Sent Events (SSE) and streamed back in real-time.
 
 ---
 

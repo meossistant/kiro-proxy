@@ -1,3 +1,4 @@
+import json
 import logging
 from contextlib import asynccontextmanager
 import uvicorn
@@ -47,6 +48,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from kiro_proxy.sessions import session_manager
+
 # Mount API Routers
 app.include_router(openai_router, tags=["OpenAI Compatible"])
 app.include_router(anthropic_router, tags=["Anthropic Compatible"])
@@ -59,19 +62,34 @@ async def health_check():
     return {
         "status": "healthy" if auth_status["authenticated"] else "unauthenticated",
         "service": "kiro-proxy",
-        "version": "0.2.1",
+        "version": "0.3.0",
         "kiro_auth": auth_status,
         "kiro_agent": settings.KIRO_AGENT,
         "default_model_openai": await registry.resolve_model(None, api_flavor="openai"),
         "default_model_anthropic": await registry.resolve_model(None, api_flavor="anthropic"),
         "available_models_count": len(active_models),
         "available_models": [m["model_id"] for m in active_models],
+        "sessions": session_manager.get_stats(),
         "endpoints": {
             "openai_chat": "/v1/chat/completions",
             "openai_models": "/v1/models",
-            "anthropic_messages": "/v1/messages"
+            "anthropic_messages": "/v1/messages",
+            "sessions": "/v1/sessions"
         }
     }
+
+@app.get("/v1/sessions")
+@app.get("/sessions")
+async def list_sessions():
+    """Diagnostic endpoint to inspect active resumed conversations and token savings."""
+    return session_manager.get_stats()
+
+@app.api_route("/api/hello", methods=["GET", "HEAD"])
+async def api_hello():
+    """Endpoint probed by Claude Code and other CLI tools for health/connectivity."""
+    return {"status": "ok"}
+
+
 
 def start():
     """CLI entrypoint for running the proxy server."""

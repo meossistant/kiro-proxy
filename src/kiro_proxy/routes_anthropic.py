@@ -1,12 +1,14 @@
 import json
+import logging
 import uuid
 from typing import AsyncGenerator
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from kiro_proxy.auth import verify_api_key
 from kiro_proxy.formatters import format_anthropic_messages
 from kiro_proxy.registry import registry
-from kiro_proxy.kiro_runner import run_kiro_stream, run_kiro_complete
+from kiro_proxy.sessions import session_manager
+from kiro_proxy.kiro_runner import run_kiro_stream, run_kiro_complete, SessionNotFoundError
 from kiro_proxy.models import (
     AnthropicMessageRequest,
     AnthropicMessageResponse,
@@ -14,17 +16,34 @@ from kiro_proxy.models import (
     AnthropicUsage
 )
 
+logger = logging.getLogger("kiro-proxy.anthropic")
+
 router = APIRouter(dependencies=[Depends(verify_api_key)])
 
 @router.post("/v1/messages")
 @router.post("/messages")
-async def anthropic_messages(request: AnthropicMessageRequest):
+async def anthropic_messages(request: AnthropicMessageRequest, raw_request: Request):
     """
-    Anthropic-compatible Messages API with dynamic routing and stream-json parsing.
-    Defaults to Sonnet (claude-sonnet-5.5 or best available sonnet in active tier).
+    Anthropic-compatible Messages API with dynamic routing, stream-json parsing,
+    and automatic conversation continuation for cached token reuse.
     """
     mapped_model = await registry.resolve_model(request.model, api_flavor="anthropic")
-    prompt = format_anthropic_messages(request.messages, system=request.system)
+    
+    # Extract client conversation identifier (e.g. from Claude Code CLI x-claude-code-session-id)
+    client_key = session_manager.extract_client_key(
+        headers=dict(raw_request.headers),
+        body_metadata=request.metadata,
+        messages=request.messages,
+        system=request.system
+    )
+
+    resume_id, delta_messages, is_continuation = session_manager.prepare_turn(
+        client_key, request.messages, mapped_model
+    )
+    prompt = format_anthropic_messages(
+        delta_messages, system=request.system, is_continuation=is_continuation
+    )
+
     msg_id = f"msg_{uuid.uuid4().hex[:20]}"
     prompt_tokens = max(1, len(prompt.split()))
 
@@ -61,19 +80,54 @@ async def anthropic_messages(request: AnthropicMessageRequest):
             yield f"event: content_block_start\ndata: {json.dumps(block_start_payload, ensure_ascii=False)}\n\n"
 
             accumulated_output = ""
-            async for event in run_kiro_stream(prompt, model=mapped_model):
-                if event["type"] == "chunk":
-                    chunk_text = event["text"]
-                    accumulated_output += chunk_text
-                    delta_payload = {
-                        "type": "content_block_delta",
-                        "index": 0,
-                        "delta": {
-                            "type": "text_delta",
-                            "text": chunk_text
+            captured_session_id = resume_id
+
+            try:
+                async for event in run_kiro_stream(prompt, model=mapped_model, resume_id=resume_id):
+                    if event["type"] == "chunk":
+                        chunk_text = event["text"]
+                        accumulated_output += chunk_text
+                        delta_payload = {
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {
+                                "type": "text_delta",
+                                "text": chunk_text
+                            }
                         }
-                    }
-                    yield f"event: content_block_delta\ndata: {json.dumps(delta_payload, ensure_ascii=False)}\n\n"
+                        yield f"event: content_block_delta\ndata: {json.dumps(delta_payload, ensure_ascii=False)}\n\n"
+                    elif event["type"] == "done":
+                        if event.get("session_id"):
+                            captured_session_id = event["session_id"]
+            except SessionNotFoundError:
+                logger.warning(f"Resume failed for session '{resume_id}'. Invalidate and retry from scratch.")
+                session_manager.invalidate_session(client_key=client_key)
+                # Fallback to full prompt without resume_id
+                full_prompt = format_anthropic_messages(
+                    request.messages, system=request.system, is_continuation=False
+                )
+                async for event in run_kiro_stream(full_prompt, model=mapped_model, resume_id=None):
+                    if event["type"] == "chunk":
+                        chunk_text = event["text"]
+                        accumulated_output += chunk_text
+                        delta_payload = {
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {
+                                "type": "text_delta",
+                                "text": chunk_text
+                            }
+                        }
+                        yield f"event: content_block_delta\ndata: {json.dumps(delta_payload, ensure_ascii=False)}\n\n"
+                    elif event["type"] == "done":
+                        if event.get("session_id"):
+                            captured_session_id = event["session_id"]
+
+            # Record session state on completion
+            if captured_session_id:
+                session_manager.record_session(
+                    client_key, captured_session_id, len(request.messages), mapped_model
+                )
 
             # 3. content_block_stop
             block_stop_payload = {
@@ -110,7 +164,26 @@ async def anthropic_messages(request: AnthropicMessageRequest):
         )
 
     # Non-streaming response
-    text, _ = await run_kiro_complete(prompt, model=mapped_model)
+    captured_session_id = resume_id
+    try:
+        text, _, sid = await run_kiro_complete(prompt, model=mapped_model, resume_id=resume_id)
+        if sid:
+            captured_session_id = sid
+    except SessionNotFoundError:
+        logger.warning(f"Resume failed for session '{resume_id}'. Invalidate and retry from scratch.")
+        session_manager.invalidate_session(client_key=client_key)
+        full_prompt = format_anthropic_messages(
+            request.messages, system=request.system, is_continuation=False
+        )
+        text, _, sid = await run_kiro_complete(full_prompt, model=mapped_model, resume_id=None)
+        if sid:
+            captured_session_id = sid
+
+    if captured_session_id:
+        session_manager.record_session(
+            client_key, captured_session_id, len(request.messages), mapped_model
+        )
+
     output_tokens = max(1, len(text.split()))
 
     return AnthropicMessageResponse(

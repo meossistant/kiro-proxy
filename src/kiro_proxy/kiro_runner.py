@@ -5,7 +5,7 @@ from typing import AsyncGenerator, Any
 from fastapi import HTTPException
 from kiro_proxy.config import settings
 
-logger = logging.getLogger("kiro-proxy")
+logger = logging.getLogger("kiro-proxy.runner")
 
 AUTH_ERROR_PATTERNS = [
     "not logged in",
@@ -15,6 +15,10 @@ AUTH_ERROR_PATTERNS = [
     "session expired",
     "unauthorized"
 ]
+
+class SessionNotFoundError(Exception):
+    """Raised when an existing conversation session could not be resumed by kiro-cli."""
+    pass
 
 async def check_kiro_auth() -> dict[str, Any]:
     """
@@ -41,10 +45,12 @@ async def run_kiro_stream(
     prompt: str,
     model: str | None = None,
     agent: str | None = None,
-    timeout_seconds: float = 60.0
+    resume_id: str | None = None,
+    timeout_seconds: float = 120.0
 ) -> AsyncGenerator[dict[str, Any], None]:
     """
     Run kiro-cli chat with stream-json output format.
+    Supports resuming conversations via resume_id to leverage prompt cache.
     Safely detects expired/missing authentication and raises HTTP 401.
     """
     agent_name = agent or settings.KIRO_AGENT
@@ -54,6 +60,8 @@ async def run_kiro_stream(
         "--agent", agent_name,
         "--output-format", "stream-json"
     ]
+    if resume_id:
+        cmd.extend(["--resume-id", resume_id])
     if model and model != "auto":
         cmd.extend(["--model", model])
 
@@ -89,10 +97,10 @@ async def run_kiro_stream(
     accumulated_text = ""
     had_output = False
     stop_reason = "stop"
-    stderr_captured: list[str] = []
+    captured_session_id = resume_id
 
     async def read_stdout():
-        nonlocal had_output, accumulated_text, stop_reason
+        nonlocal had_output, accumulated_text, stop_reason, captured_session_id
         if not process.stdout:
             return
 
@@ -123,6 +131,15 @@ async def run_kiro_stream(
                     }
                 )
 
+            # Check for ACP session errors when resume was attempted
+            if "load_session failed" in line_lower or "not found" in line_lower:
+                if resume_id:
+                    try:
+                        process.terminate()
+                    except Exception:
+                        pass
+                    raise SessionNotFoundError(f"Kiro session '{resume_id}' could not be resumed.")
+
             try:
                 event = json.loads(line_str)
             except json.JSONDecodeError:
@@ -132,7 +149,21 @@ async def run_kiro_stream(
             event_type = event.get("type")
             data = event.get("data", {})
 
-            if event_type == "sessionUpdate":
+            # Extract sessionId if present
+            sid = data.get("sessionId")
+            if sid and not captured_session_id:
+                captured_session_id = sid
+
+            if event_type == "runError":
+                error_msg = data.get("message", "")
+                if resume_id and ("not found" in error_msg.lower() or "session" in error_msg.lower()):
+                    try:
+                        process.terminate()
+                    except Exception:
+                        pass
+                    raise SessionNotFoundError(f"Kiro session '{resume_id}' not found: {error_msg}")
+
+            elif event_type == "sessionUpdate":
                 update = data.get("update", {})
                 if update.get("sessionUpdate") == "agent_message_chunk":
                     chunk_text = update.get("content", {}).get("text", "")
@@ -148,11 +179,12 @@ async def run_kiro_stream(
                 yield {
                     "type": "done",
                     "text": final_text,
-                    "stop_reason": stop_reason
+                    "stop_reason": stop_reason,
+                    "session_id": captured_session_id
                 }
 
     try:
-        # Wrap reading with timeout to prevent hanging on interactive prompt
+        # Wrap reading with timeout to prevent hanging
         async for item in read_stdout():
             yield item
     except asyncio.TimeoutError:
@@ -173,6 +205,9 @@ async def run_kiro_stream(
         logger.error(f"kiro-cli exited with code {returncode}: {stderr_text}")
 
         stderr_lower = stderr_text.lower()
+        if resume_id and ("not found" in stderr_lower or "load_session failed" in stderr_lower):
+            raise SessionNotFoundError(f"Kiro session '{resume_id}' not found: {stderr_text}")
+
         if any(pat in stderr_lower for pat in AUTH_ERROR_PATTERNS):
             raise HTTPException(
                 status_code=401,
@@ -194,21 +229,25 @@ async def run_kiro_stream(
 async def run_kiro_complete(
     prompt: str,
     model: str | None = None,
-    agent: str | None = None
-) -> tuple[str, str]:
+    agent: str | None = None,
+    resume_id: str | None = None
+) -> tuple[str, str, str | None]:
     """
     Execute kiro-cli and wait for the complete response.
-    Returns (final_text, stop_reason).
+    Returns (final_text, stop_reason, session_id).
     """
     final_text = ""
     stop_reason = "stop"
+    captured_session_id = resume_id
 
-    async for event in run_kiro_stream(prompt, model=model, agent=agent):
+    async for event in run_kiro_stream(prompt, model=model, agent=agent, resume_id=resume_id):
         if event["type"] == "chunk":
             final_text += event["text"]
         elif event["type"] == "done":
             if event.get("text"):
                 final_text = event["text"]
             stop_reason = event.get("stop_reason", "stop")
+            if event.get("session_id"):
+                captured_session_id = event["session_id"]
 
-    return final_text, stop_reason
+    return final_text, stop_reason, captured_session_id
